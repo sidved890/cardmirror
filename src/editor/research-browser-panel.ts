@@ -343,11 +343,20 @@ export class ResearchBrowserPanel {
     if (!this.unsubscribeNavState) {
       this.unsubscribeNavState = this.host.onBrowserNavState((state) => {
         const tab = this.tabs.find((t) => t.id === state.tabId);
-        if (tab) {
-          tab.title = state.title;
-          tab.url = state.url;
-          this.renderTabStrip();
+        if (!tab) {
+          // A tab main created on its own initiative — a page's
+          // "open in new tab" link (main's popup handler spawns +
+          // switches to a real new tab, see main.ts). Our local
+          // mirror doesn't know about it yet; a full refresh picks
+          // it up (including which tab is now active) and the native
+          // view needs real bounds since it's never had any.
+          void this.refreshTabs();
+          this.syncBounds();
+          return;
         }
+        tab.title = state.title;
+        tab.url = state.url;
+        this.renderTabStrip();
         if (state.tabId === this.activeTabId) {
           this.addressInput.value = state.url;
           this.backBtn.disabled = !state.canGoBack;

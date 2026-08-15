@@ -637,7 +637,7 @@ function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void 
   });
 }
 
-function createResearchBrowserTab(win: BrowserWindow): BrowserTab {
+function createResearchBrowserTab(win: BrowserWindow, initialUrl = RESEARCH_BROWSER_HOME): BrowserTab {
   const view = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
@@ -645,11 +645,26 @@ function createResearchBrowserTab(win: BrowserWindow): BrowserTab {
       sandbox: true,
     },
   });
-  // Deny popups outright — a genuine new-tab intent opens in the OS
-  // browser instead of spawning another in-app surface. Non-http(s)
-  // schemes (file:, chrome:, custom protocol handlers) never open.
+  const tab: BrowserTab = { id: `rbtab-${++researchBrowserTabCounter}`, view };
+  // A page's own "open in new tab" intent (target="_blank", window.open,
+  // a modifier-clicked link) becomes a new CardMirror Browser tab, not an
+  // OS-browser escape or an extra in-app window — that's what a user
+  // clicking a link INSIDE the embedded browser expects. Non-http(s)
+  // schemes (file:, chrome:, custom protocol handlers) still refuse to
+  // open at all, in-app or out.
   view.webContents.setWindowOpenHandler(({ url }) => {
-    if (isNavigableUrl(url)) void shell.openExternal(url);
+    if (!isNavigableUrl(url)) return { action: 'deny' };
+    const state = researchBrowsers.get(win.id);
+    if (!state) {
+      // No tab registry yet (this tab is mid-construction) — the only
+      // way a popup could fire before that. Fall back to the OS
+      // browser rather than dropping the navigation.
+      void shell.openExternal(url);
+      return { action: 'deny' };
+    }
+    const newTab = createResearchBrowserTab(win, url);
+    state.tabs.push(newTab);
+    switchResearchBrowserTab(win, state, newTab.id);
     return { action: 'deny' };
   });
   view.webContents.on('will-navigate', (event, url) => {
@@ -660,7 +675,6 @@ function createResearchBrowserTab(win: BrowserWindow): BrowserTab {
   });
   view.webContents.session.on('will-download', (event) => event.preventDefault());
 
-  const tab: BrowserTab = { id: `rbtab-${++researchBrowserTabCounter}`, view };
   const notify = (): void => sendResearchBrowserNavState(win, tab);
   view.webContents.on('did-navigate', notify);
   view.webContents.on('did-navigate-in-page', notify);
@@ -668,7 +682,7 @@ function createResearchBrowserTab(win: BrowserWindow): BrowserTab {
   view.webContents.on('did-start-loading', notify);
   view.webContents.on('did-stop-loading', notify);
 
-  void view.webContents.loadURL(RESEARCH_BROWSER_HOME);
+  void view.webContents.loadURL(initialUrl);
   return tab;
 }
 

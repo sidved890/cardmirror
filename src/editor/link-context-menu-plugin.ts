@@ -1,13 +1,22 @@
 /**
- * Right-click context menu for `link` marks: Open Link, Open in
- * CardMirror Browser (desktop only), Copy Link Address, Edit Link…,
- * Remove Link. Open Link routes through `ElectronHost.openExternal`
- * on desktop so URLs open in the OS browser rather than a new
- * BrowserWindow; the web build uses `window.open` with
- * `noopener,noreferrer`. "Open in CardMirror Browser" routes through
- * `ResearchBrowserPanel.openLink` — a new tab if the panel's already
- * open, else the same auto-pane/picker flow `toggle()` uses. Edit/
- * Remove operate on the full contiguous run carrying the clicked mark.
+ * Right-click context menu for links: Open Link, Open in CardMirror
+ * Browser (desktop only), Copy Link Address, and — for a REAL `link`
+ * mark only — Edit Link…, Remove Link. Open Link routes through
+ * `ElectronHost.openExternal` on desktop so URLs open in the OS
+ * browser rather than a new BrowserWindow; the web build uses
+ * `window.open` with `noopener,noreferrer`. "Open in CardMirror
+ * Browser" routes through `ResearchBrowserPanel.openLink` — a new
+ * tab if the panel's already open, else the same auto-pane/picker
+ * flow `toggle()` uses. Edit/Remove operate on the full contiguous
+ * run carrying the clicked mark.
+ *
+ * Two ways to hit a link: a real `link` mark (`findLinkAt`), or bare
+ * URL TEXT with no mark at all (`findPlainUrlAt`) — most pasted URLs
+ * in this app are never actually linkified (no autolink-on-paste),
+ * so the common case is a `https://…` run that's just plain text
+ * with no `<a>` in the DOM. The plain-text path skips Edit/Remove
+ * (there's no mark to touch) but still offers Open Link / Open in
+ * CardMirror Browser / Copy Link Address.
  *
  * Non-link right-clicks fall through (the image context menu wins
  * for image elements; everything else keeps the browser default).
@@ -31,15 +40,10 @@ export const linkContextMenuPlugin: Plugin = new Plugin({
     handleDOMEvents: {
       contextmenu(view, event) {
         const target = event.target as HTMLElement | null;
-        if (!target) return false;
-        // The link mark's toDOM produces a bare `<a href="…">`, so
-        // any contextmenu event whose target is inside an `<a>`
-        // descendant of the editor is on a link.
-        const anchor = target.closest?.('a[href]') as HTMLAnchorElement | null;
-        if (!anchor) return false;
-        if (!view.dom.contains(anchor)) return false;
+        if (!target || !view.dom.contains(target)) return false;
 
-        const hit = findLinkAt(view, event.clientX, event.clientY);
+        const hit = findLinkAt(view, event.clientX, event.clientY) ??
+          findPlainUrlAt(view, event.clientX, event.clientY);
         if (!hit) return false;
 
         event.preventDefault();
@@ -52,11 +56,14 @@ export const linkContextMenuPlugin: Plugin = new Plugin({
 
 interface LinkHit {
   href: string;
-  /** Start position of the contiguous run carrying THIS link mark. */
+  /** Start position of the contiguous run carrying this URL. */
   from: number;
   /** End position of the same run. */
   to: number;
-  mark: Mark;
+  /** Present for a real `link` mark hit; absent for a bare-text URL
+   *  hit — Edit Link…/Remove Link only show when this is set, since
+   *  there's no mark to edit or remove otherwise. */
+  mark?: Mark;
 }
 
 /** Locate the link mark at a viewport (x, y) coordinate. Walks
@@ -124,6 +131,42 @@ function findLinkAt(view: EditorView, x: number, y: number): LinkHit | null {
   return { href, from, to, mark };
 }
 
+/** Matches the same `https?://…` shape `resolveNavigationTarget`
+ *  (main.ts) treats as a URL — a run of non-whitespace, non-quote,
+ *  non-bracket characters right after the scheme, so trailing
+ *  punctuation like a sentence's closing period or a wrapping `)`
+ *  doesn't get swallowed into the link. */
+const PLAIN_URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+
+/** Locate a bare `https://…` URL run in plain TEXT at a viewport
+ *  (x, y) coordinate — no `link` mark required. Scans the enclosing
+ *  textblock's full text for URL-shaped substrings and returns the
+ *  one the click position falls inside, or null. This is the common
+ *  case: nothing in this app auto-linkifies pasted URLs, so most
+ *  "links" users right-click are just plain text that happens to
+ *  read as a URL. */
+function findPlainUrlAt(view: EditorView, x: number, y: number): LinkHit | null {
+  const coords = view.posAtCoords({ left: x, top: y });
+  if (!coords) return null;
+  const doc = view.state.doc;
+  const $pos = doc.resolve(Math.max(0, Math.min(coords.pos, doc.content.size)));
+  const block = $pos.parent;
+  if (!block.isTextblock) return null;
+  const blockStart = $pos.start();
+  const offsetInBlock = coords.pos - blockStart;
+  const text = block.textContent;
+  PLAIN_URL_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = PLAIN_URL_RE.exec(text))) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (offsetInBlock >= start && offsetInBlock <= end) {
+      return { href: match[0], from: blockStart + start, to: blockStart + end };
+    }
+  }
+  return null;
+}
+
 interface MenuItem {
   label: string;
   disabled?: boolean;
@@ -158,14 +201,19 @@ function showLinkContextMenu(
       label: 'Copy Link Address',
       action: () => copyToClipboard(hit.href),
     },
-    {
-      label: 'Edit Link…',
-      action: () => void editLink(view, hit),
-    },
-    {
-      label: 'Remove Link',
-      action: () => removeLink(view, hit),
-    },
+    // Nothing to edit/remove for a bare-text URL hit — there's no mark.
+    ...(hit.mark
+      ? [
+          {
+            label: 'Edit Link…',
+            action: () => void editLink(view, hit),
+          },
+          {
+            label: 'Remove Link',
+            action: () => removeLink(view, hit),
+          },
+        ]
+      : []),
   ];
 
   const menu = document.createElement('div');
