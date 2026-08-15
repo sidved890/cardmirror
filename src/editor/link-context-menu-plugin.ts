@@ -1,10 +1,13 @@
 /**
- * Right-click context menu for `link` marks: Open Link, Copy Link
- * Address, Edit Link…, Remove Link. Open Link routes through
- * `ElectronHost.openExternal` on desktop so URLs open in the OS
- * browser rather than a new BrowserWindow; the web build uses
- * `window.open` with `noopener,noreferrer`. Edit/Remove operate on
- * the full contiguous run carrying the clicked mark.
+ * Right-click context menu for `link` marks: Open Link, Open in
+ * CardMirror Browser (desktop only), Copy Link Address, Edit Link…,
+ * Remove Link. Open Link routes through `ElectronHost.openExternal`
+ * on desktop so URLs open in the OS browser rather than a new
+ * BrowserWindow; the web build uses `window.open` with
+ * `noopener,noreferrer`. "Open in CardMirror Browser" routes through
+ * `ResearchBrowserPanel.openLink` — a new tab if the panel's already
+ * open, else the same auto-pane/picker flow `toggle()` uses. Edit/
+ * Remove operate on the full contiguous run carrying the clicked mark.
  *
  * Non-link right-clicks fall through (the image context menu wins
  * for image elements; everything else keeps the browser default).
@@ -20,6 +23,8 @@ import { promptForText } from './text-prompt.js';
 import { showToast } from './toast.js';
 import { writeClipboardText } from './clipboard-write.js';
 import { getElectronHost } from './host/index.js';
+import { researchBrowserEnabled } from './research-browser-gate.js';
+import { getResearchBrowserPanel } from './research-browser-panel.js';
 
 export const linkContextMenuPlugin: Plugin = new Plugin({
   props: {
@@ -141,6 +146,14 @@ function showLinkContextMenu(
       label: 'Open Link',
       action: () => openLinkExternally(hit.href),
     },
+    ...(researchBrowserEnabled()
+      ? [
+          {
+            label: 'Open in CardMirror Browser',
+            action: () => getResearchBrowserPanel()?.openLink(hit.href),
+          },
+        ]
+      : []),
     {
       label: 'Copy Link Address',
       action: () => copyToClipboard(hit.href),

@@ -86,6 +86,17 @@ interface BrowserTabInfo {
   url: string;
 }
 
+/** The one instance index.ts creates (there's only ever one per
+ *  window). Exposed for callers with no natural way to thread the
+ *  instance through — e.g. `link-context-menu-plugin.ts`'s "Open in
+ *  CardMirror Browser" — mirroring the `getElectronHost()` /
+ *  `getSpeechDocResolver()` singleton-accessor pattern already used
+ *  elsewhere in this codebase. */
+let activePanel: ResearchBrowserPanel | null = null;
+export function getResearchBrowserPanel(): ResearchBrowserPanel | null {
+  return activePanel;
+}
+
 export class ResearchBrowserPanel {
   private readonly el: HTMLDivElement;
   private readonly tabStripEl: HTMLDivElement;
@@ -113,6 +124,7 @@ export class ResearchBrowserPanel {
   private activeTabId: string | null = null;
 
   constructor(private readonly opts: ResearchBrowserPanelOpts) {
+    activePanel = this;
     // Electron's WebContentsView always paints over ALL same-window DOM
     // content — including modals — regardless of CSS z-index. Pause it
     // (remove the native view; the DOM toolbar/picker are unaffected)
@@ -238,20 +250,41 @@ export class ResearchBrowserPanel {
       this.close();
       return;
     }
+    this.openFlow();
+  }
+
+  /** "Open in CardMirror Browser" from the link right-click menu
+   *  (`link-context-menu-plugin.ts`). If the browser's already open,
+   *  the link becomes a NEW tab (existing tabs are left alone) — if
+   *  not, opens it fresh straight to `href` (same auto-pane / picker
+   *  flow as `toggle()`, so an all-panes-full workspace still asks
+   *  which pane to use, per the same pane-availability logic). */
+  openLink(href: string): void {
+    if (!researchBrowserEnabled() || !this.host) return;
+    if (this.visible) {
+      void this.newTabThenNavigate(href);
+      return;
+    }
+    this.openFlow(href);
+  }
+
+  /** Shared "get the panel on screen" flow behind both `toggle()` and
+   *  `openLink()` — the only difference is what the freshly-opened
+   *  tab loads. Prefers an EMPTY pane — auto-expanding the split (one
+   *  doc open → opens in pane 2; two docs open → pane 3) exactly like
+   *  opening another doc there would, including the layout mode's
+   *  compact-thirds vs wide-with-peek rendering. Falls back to
+   *  picking one of the already-occupied panes to take over only
+   *  once every pane has a real doc loaded. */
+  private openFlow(initialUrl?: string): void {
     if (!researchBrowserEnabled() || !this.host) return;
     if (!multiPaneShellActive()) {
       showToast('Turn on the multi-pane workspace (split view) to use the research browser.');
       return;
     }
-    // Prefer an EMPTY pane — auto-expanding the split (one doc open →
-    // opens in pane 2; two docs open → pane 3) exactly like opening
-    // another doc there would, including the layout mode's compact-
-    // thirds vs wide-with-peek rendering. Falls back to picking one of
-    // the already-occupied panes to take over only once every pane has
-    // a real doc loaded.
     const opened = openResearchBrowserPane();
     if (opened) {
-      this.openInPane(opened.id, opened.el);
+      this.openInPane(opened.id, opened.el, initialUrl);
       return;
     }
     const candidates = researchBrowserSlotCandidates();
@@ -260,13 +293,16 @@ export class ResearchBrowserPanel {
       return;
     }
     if (candidates.length === 1) {
-      this.openInPane(candidates[0]!.id, candidates[0]!.el);
+      this.openInPane(candidates[0]!.id, candidates[0]!.el, initialUrl);
       return;
     }
-    this.showPicker(candidates);
+    this.showPicker(candidates, initialUrl);
   }
 
-  private showPicker(candidates: Array<{ id: SlotId; label: string; el: HTMLElement }>): void {
+  private showPicker(
+    candidates: Array<{ id: SlotId; label: string; el: HTMLElement }>,
+    initialUrl?: string,
+  ): void {
     this.pickerEl.replaceChildren();
     const heading = document.createElement('div');
     heading.className = 'research-browser-picker-heading';
@@ -278,7 +314,7 @@ export class ResearchBrowserPanel {
       btn.textContent = c.label;
       btn.addEventListener('click', () => {
         this.hidePicker();
-        this.openInPane(c.id, c.el);
+        this.openInPane(c.id, c.el, initialUrl);
       });
       this.pickerEl.appendChild(btn);
     }
@@ -295,7 +331,7 @@ export class ResearchBrowserPanel {
     this.pickerEl.style.display = 'none';
   }
 
-  private openInPane(id: SlotId, el: HTMLElement): void {
+  private openInPane(id: SlotId, el: HTMLElement, initialUrl?: string): void {
     if (!this.host) return;
     this.dockedEl = el;
     this.dockedSlotId = id;
@@ -323,6 +359,21 @@ export class ResearchBrowserPanel {
     this.resizeObserver.observe(el);
     this.syncBounds();
     void this.refreshTabs();
+    // Supersedes the fresh tab's default home-page load — no separate
+    // "new tab with URL" IPC needed, `browserNavigate` already targets
+    // whichever tab is active, which is this one.
+    if (initialUrl) void this.host.browserNavigate(initialUrl);
+  }
+
+  /** Open a new tab and immediately point it at `href` — used when
+   *  the browser is already open and a link should land as a new
+   *  tab rather than disturbing whatever's in the current one. */
+  private async newTabThenNavigate(href: string): Promise<void> {
+    if (!this.host) return;
+    await this.host.browserTabNew();
+    await this.refreshTabs();
+    this.syncBounds();
+    void this.host.browserNavigate(href);
   }
 
   /** Re-fetch the full tab list from main (the authoritative source —
