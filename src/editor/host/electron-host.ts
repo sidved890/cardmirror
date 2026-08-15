@@ -356,6 +356,7 @@ interface ElectronAPI {
   browserGetSelection?(): Promise<{ text: string; title: string; url: string }>;
   onBrowserNavState?(
     handler: (state: {
+      tabId: string;
       url: string;
       title: string;
       canGoBack: boolean;
@@ -363,6 +364,12 @@ interface ElectronAPI {
       loading: boolean;
     }) => void,
   ): () => void;
+  /** Research browser tabs — each backed by its own main-process
+   *  `WebContentsView` so history/scroll persist independently. */
+  browserTabNew?(): Promise<{ id: string } | null>;
+  browserTabSwitch?(tabId: string): Promise<void>;
+  browserTabClose?(tabId: string): Promise<void>;
+  browserTabList?(): Promise<Array<{ id: string; title: string; url: string; active: boolean }>>;
   /** System woke from sleep — long-lived streams should hard-restart. */
   onPowerResumed?(handler: () => void): () => void;
   onPairingInboxChanged?(handler: (items: PairingInboxItemIpc[]) => void): () => void;
@@ -1121,6 +1128,7 @@ export class ElectronHost implements Host {
   }
   onBrowserNavState(
     handler: (state: {
+      tabId: string;
       url: string;
       title: string;
       canGoBack: boolean;
@@ -1129,6 +1137,18 @@ export class ElectronHost implements Host {
     }) => void,
   ): () => void {
     return api().onBrowserNavState?.(handler) ?? (() => {});
+  }
+  async browserTabNew(): Promise<{ id: string } | null> {
+    return (await api().browserTabNew?.()) ?? null;
+  }
+  async browserTabSwitch(tabId: string): Promise<void> {
+    await api().browserTabSwitch?.(tabId);
+  }
+  async browserTabClose(tabId: string): Promise<void> {
+    await api().browserTabClose?.(tabId);
+  }
+  async browserTabList(): Promise<Array<{ id: string; title: string; url: string; active: boolean }>> {
+    return (await api().browserTabList?.()) ?? [];
   }
 
   onPowerResumed(handler: () => void): () => void {

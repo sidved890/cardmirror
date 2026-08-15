@@ -15,11 +15,18 @@
  * panel just removes the overlay; nothing structural changes in the
  * pane underneath.
  *
- * The native view itself (`apps/desktop/src/main.ts`) sits BELOW this
- * module's DOM toolbar strip (`RESEARCH_BROWSER_TOOLBAR_HEIGHT`, kept
- * in sync between the two) — a WebContentsView always paints over
- * same-window DOM content it overlaps, so the toolbar has to occupy
- * space the native view doesn't cover.
+ * Tabs: each tab is backed by main's own `WebContentsView` (see
+ * `apps/desktop/src/main.ts`'s `BrowserTab`), so switching tabs keeps
+ * every tab's history/scroll position — only the active one is
+ * attached to the window. This module just mirrors main's tab list
+ * (`refreshTabs`) and renders the strip; it holds no navigation state
+ * of its own.
+ *
+ * The native view itself sits BELOW this module's DOM toolbar strip
+ * (`RESEARCH_BROWSER_TOOLBAR_HEIGHT`, kept in sync between the two) —
+ * a WebContentsView always paints over same-window DOM content it
+ * overlaps, so the toolbar has to occupy space the native view
+ * doesn't cover.
  *
  * Selection actions:
  *   - "Insert as Cite" runs the SAME pipeline `ai/cite-creator.ts`
@@ -72,8 +79,15 @@ export interface ResearchBrowserPanelOpts {
   toggleButton?: HTMLButtonElement | null;
 }
 
+interface BrowserTabInfo {
+  id: string;
+  title: string;
+  url: string;
+}
+
 export class ResearchBrowserPanel {
   private readonly el: HTMLDivElement;
+  private readonly tabStripEl: HTMLDivElement;
   private readonly addressInput: HTMLInputElement;
   private readonly backBtn: HTMLButtonElement;
   private readonly forwardBtn: HTMLButtonElement;
@@ -90,6 +104,12 @@ export class ResearchBrowserPanel {
    *  hidden for it — see the class doc comment. Distinct from
    *  `visible`: the panel is still logically open, just paused. */
   private pausedForOverlay = false;
+  /** Local mirror of main's per-window tab list — kept in sync by
+   *  `refreshTabs()` (full re-fetch, used on open/new/close/switch)
+   *  and by the nav-state stream (title/url of whichever tab just
+   *  navigated, without a round-trip). */
+  private tabs: BrowserTabInfo[] = [];
+  private activeTabId: string | null = null;
 
   constructor(private readonly opts: ResearchBrowserPanelOpts) {
     // Electron's WebContentsView always paints over ALL same-window DOM
@@ -156,6 +176,9 @@ export class ResearchBrowserPanel {
     this.insertTextBtn.title = 'Insert the selected text as-is';
     this.insertTextBtn.addEventListener('click', () => void this.insertAsText());
 
+    this.tabStripEl = document.createElement('div');
+    this.tabStripEl.className = 'research-browser-tab-strip';
+
     const navRow = document.createElement('div');
     navRow.className = 'research-browser-nav-row';
     navRow.append(this.backBtn, this.forwardBtn, reloadBtn, this.addressInput, closeBtn);
@@ -164,7 +187,7 @@ export class ResearchBrowserPanel {
     actionRow.className = 'research-browser-action-row';
     actionRow.append(this.insertCiteBtn, this.insertTextBtn);
 
-    this.el.append(navRow, actionRow);
+    this.el.append(this.tabStripEl, navRow, actionRow);
 
     this.pickerEl = document.createElement('div');
     this.pickerEl.className = 'research-browser-picker';
@@ -253,13 +276,93 @@ export class ResearchBrowserPanel {
     void this.host.browserToggle(true);
     if (!this.unsubscribeNavState) {
       this.unsubscribeNavState = this.host.onBrowserNavState((state) => {
-        this.addressInput.value = state.url;
-        this.backBtn.disabled = !state.canGoBack;
-        this.forwardBtn.disabled = !state.canGoForward;
+        const tab = this.tabs.find((t) => t.id === state.tabId);
+        if (tab) {
+          tab.title = state.title;
+          tab.url = state.url;
+          this.renderTabStrip();
+        }
+        if (state.tabId === this.activeTabId) {
+          this.addressInput.value = state.url;
+          this.backBtn.disabled = !state.canGoBack;
+          this.forwardBtn.disabled = !state.canGoForward;
+        }
       });
     }
     this.resizeObserver = new ResizeObserver(() => this.syncBounds());
     this.resizeObserver.observe(el);
+    this.syncBounds();
+    void this.refreshTabs();
+  }
+
+  /** Re-fetch the full tab list from main (the authoritative source —
+   *  local state only mirrors it) and re-render the strip. Used
+   *  whenever tabs are added/closed/switched, where main may have
+   *  made decisions the caller doesn't fully know (e.g. auto-spawning
+   *  a fresh tab when the last one closes, or picking which neighbor
+   *  becomes active). */
+  private async refreshTabs(): Promise<void> {
+    if (!this.host) return;
+    const list = await this.host.browserTabList();
+    this.tabs = list.map(({ id, title, url }) => ({ id, title, url }));
+    const active = list.find((t) => t.active);
+    this.activeTabId = active?.id ?? this.tabs[0]?.id ?? null;
+    this.addressInput.value = active?.url ?? '';
+    this.renderTabStrip();
+  }
+
+  private renderTabStrip(): void {
+    this.tabStripEl.replaceChildren();
+    for (const tab of this.tabs) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'research-browser-tab';
+      chip.classList.toggle('research-browser-tab-active', tab.id === this.activeTabId);
+      chip.title = tab.url || tab.title;
+      const label = document.createElement('span');
+      label.className = 'research-browser-tab-label';
+      label.textContent = tab.title || 'New Tab';
+      chip.appendChild(label);
+      chip.addEventListener('click', () => void this.switchTab(tab.id));
+      if (this.tabs.length > 1) {
+        const closeTabBtn = document.createElement('span');
+        closeTabBtn.className = 'research-browser-tab-close';
+        closeTabBtn.textContent = '✕';
+        closeTabBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void this.closeTab(tab.id);
+        });
+        chip.appendChild(closeTabBtn);
+      }
+      this.tabStripEl.appendChild(chip);
+    }
+    const newTabBtn = document.createElement('button');
+    newTabBtn.type = 'button';
+    newTabBtn.className = 'research-browser-tab-new';
+    newTabBtn.title = 'New tab';
+    newTabBtn.textContent = '+';
+    newTabBtn.addEventListener('click', () => void this.newTab());
+    this.tabStripEl.appendChild(newTabBtn);
+  }
+
+  private async newTab(): Promise<void> {
+    if (!this.host) return;
+    await this.host.browserTabNew();
+    await this.refreshTabs();
+    this.syncBounds();
+  }
+
+  private async switchTab(tabId: string): Promise<void> {
+    if (!this.host || tabId === this.activeTabId) return;
+    await this.host.browserTabSwitch(tabId);
+    await this.refreshTabs();
+    this.syncBounds();
+  }
+
+  private async closeTab(tabId: string): Promise<void> {
+    if (!this.host) return;
+    await this.host.browserTabClose(tabId);
+    await this.refreshTabs();
     this.syncBounds();
   }
 

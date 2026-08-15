@@ -548,37 +548,48 @@ function bytesToBuffer(bytes: unknown): Buffer {
 
 // ─── Research browser ────────────────────────────────────────────
 //
-// A WebContentsView docked INTO one pane of the multi-pane workspace
-// (never a fixed overlay over the whole window — a single-pane doc
-// has nowhere to spare) so a user can browse for source material
-// without leaving CardMirror, then send a selection into the focused
-// editor pane (research-browser-panel.ts, renderer side, which also
-// enforces the multi-pane-only gate and the pane picker). The
-// embedded page runs UNPRIVILEGED — no preload, contextIsolation on,
-// sandboxed — since it renders arbitrary third-party web content.
-// One view per document window, created lazily on first toggle and
-// kept alive (navigation state persists) across hide/show.
+// A WebContentsView (one per open tab) docked INTO one pane of the
+// multi-pane workspace (never a fixed overlay over the whole window
+// — a single-pane doc has nowhere to spare) so a user can browse for
+// source material without leaving CardMirror, then send a selection
+// into the focused editor pane (research-browser-panel.ts, renderer
+// side, which also enforces the multi-pane-only gate and the pane
+// picker). Each tab's embedded page runs UNPRIVILEGED — no preload,
+// contextIsolation on, sandboxed — since it renders arbitrary
+// third-party web content. Views persist (navigation state, scroll
+// position) across hide/show AND across tab switches — only the
+// active tab's view is attached to the window's contentView at a
+// time; the rest sit detached but alive.
 //
 // Bounds are pushed from the renderer (`host:browser-set-bounds`),
 // tracking the chosen pane's `getBoundingClientRect()` via
 // ResizeObserver — that already reacts to window resizes and
-// splitter drags, so main doesn't re-derive layout itself.
+// splitter drags, so main doesn't re-derive layout itself. The
+// renderer re-sends bounds after every tab switch too, since a
+// freshly-attached view has never had bounds applied.
 
 const RESEARCH_BROWSER_HOME = 'https://www.google.com';
-// The renderer draws its own toolbar (address bar, nav buttons, insert
-// actions) as ordinary DOM docked at the top of the same pane rect —
-// the native view is positioned BELOW it so the DOM toolbar stays
-// visible (a WebContentsView always paints over same-window DOM
-// content it overlaps). Keep in sync with the panel's CSS toolbar
-// height in research-browser-panel.ts.
-const RESEARCH_BROWSER_TOOLBAR_HEIGHT = 76;
+// The renderer draws its own toolbar (tab strip, address bar, nav
+// buttons, insert actions) as ordinary DOM docked at the top of the
+// same pane rect — the native view is positioned BELOW it so the DOM
+// toolbar stays visible (a WebContentsView always paints over
+// same-window DOM content it overlaps). Keep in sync with the
+// panel's CSS toolbar height in research-browser-panel.ts.
+const RESEARCH_BROWSER_TOOLBAR_HEIGHT = 108;
+
+interface BrowserTab {
+  id: string;
+  view: WebContentsView;
+}
 
 interface ResearchBrowserState {
-  view: WebContentsView;
+  tabs: BrowserTab[];
+  activeTabId: string;
   visible: boolean;
 }
 
 const researchBrowsers = new Map<number, ResearchBrowserState>();
+let researchBrowserTabCounter = 0;
 
 function isNavigableUrl(url: string): boolean {
   try {
@@ -589,10 +600,35 @@ function isNavigableUrl(url: string): boolean {
   }
 }
 
-function sendResearchBrowserNavState(win: BrowserWindow, view: WebContentsView): void {
+/** Resolve address-bar text to a URL to load. A bare domain typed
+ *  without a scheme (the overwhelmingly common case — "nytimes.com",
+ *  not "https://nytimes.com") should navigate straight there, not
+ *  fall through to a search query: try prefixing `https://` and
+ *  accept it when the result parses to something domain-shaped
+ *  (has a dot + plausible TLD, or is `localhost`). Anything else
+ *  (multiple words, no dot) is a genuine search. */
+function resolveNavigationTarget(input: string): string {
+  const trimmed = input.trim();
+  if (isNavigableUrl(trimmed)) return trimmed;
+  if (!/\s/.test(trimmed)) {
+    const withScheme = `https://${trimmed}`;
+    try {
+      const { hostname } = new URL(withScheme);
+      if (hostname === 'localhost' || /\.[a-z]{2,}$/i.test(hostname)) {
+        return withScheme;
+      }
+    } catch {
+      /* not domain-shaped — fall through to search */
+    }
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+}
+
+function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void {
   if (win.isDestroyed() || win.webContents.isDestroyed()) return;
-  const wc = view.webContents;
+  const wc = tab.view.webContents;
   win.webContents.send('host:browser-nav-state', {
+    tabId: tab.id,
     url: wc.getURL(),
     title: wc.getTitle(),
     canGoBack: wc.navigationHistory.canGoBack(),
@@ -601,10 +637,7 @@ function sendResearchBrowserNavState(win: BrowserWindow, view: WebContentsView):
   });
 }
 
-function getOrCreateResearchBrowser(win: BrowserWindow): ResearchBrowserState {
-  const existing = researchBrowsers.get(win.id);
-  if (existing) return existing;
-
+function createResearchBrowserTab(win: BrowserWindow): BrowserTab {
   const view = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
@@ -627,20 +660,51 @@ function getOrCreateResearchBrowser(win: BrowserWindow): ResearchBrowserState {
   });
   view.webContents.session.on('will-download', (event) => event.preventDefault());
 
-  const state: ResearchBrowserState = { view, visible: false };
-  researchBrowsers.set(win.id, state);
-
-  const notify = (): void => sendResearchBrowserNavState(win, view);
+  const tab: BrowserTab = { id: `rbtab-${++researchBrowserTabCounter}`, view };
+  const notify = (): void => sendResearchBrowserNavState(win, tab);
   view.webContents.on('did-navigate', notify);
   view.webContents.on('did-navigate-in-page', notify);
   view.webContents.on('page-title-updated', notify);
   view.webContents.on('did-start-loading', notify);
   view.webContents.on('did-stop-loading', notify);
 
-  win.on('closed', () => researchBrowsers.delete(win.id));
-
   void view.webContents.loadURL(RESEARCH_BROWSER_HOME);
+  return tab;
+}
+
+function getOrCreateResearchBrowser(win: BrowserWindow): ResearchBrowserState {
+  const existing = researchBrowsers.get(win.id);
+  if (existing) return existing;
+  const firstTab = createResearchBrowserTab(win);
+  const state: ResearchBrowserState = {
+    tabs: [firstTab],
+    activeTabId: firstTab.id,
+    visible: false,
+  };
+  researchBrowsers.set(win.id, state);
+  win.on('closed', () => researchBrowsers.delete(win.id));
   return state;
+}
+
+function activeResearchTab(state: ResearchBrowserState): BrowserTab | null {
+  return state.tabs.find((t) => t.id === state.activeTabId) ?? null;
+}
+
+/** Swap the attached (visible) tab. Detaches the previously-active
+ *  view (if the panel is showing) and attaches `tabId`'s — its
+ *  bounds are whatever it last had (0×0 for a brand-new tab; the
+ *  renderer re-sends real bounds right after switching). No-op if
+ *  `tabId` isn't a live tab. */
+function switchResearchBrowserTab(win: BrowserWindow, state: ResearchBrowserState, tabId: string): void {
+  const target = state.tabs.find((t) => t.id === tabId);
+  if (!target) return;
+  const prev = activeResearchTab(state);
+  if (state.visible && prev && prev.id !== target.id) {
+    win.contentView.removeChildView(prev.view);
+  }
+  state.activeTabId = target.id;
+  if (state.visible) win.contentView.addChildView(target.view);
+  sendResearchBrowserNavState(win, target);
 }
 
 // ─── IPC handlers ──────────────────────────────────────────────────
@@ -697,92 +761,154 @@ ipcMain.handle('host:toggle-devtools', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.webContents.toggleDevTools();
 });
 
-/** Research browser (desktop-only) — a docked WebContentsView the user
- *  browses source material in and pulls selections out of. See the
- *  helpers above for the embedding + isolation posture. */
+/** Research browser (desktop-only) — a docked WebContentsView per tab
+ *  the user browses source material in and pulls selections out of.
+ *  See the helpers above for the embedding + isolation posture and
+ *  the tab model. Every handler below acts on the ACTIVE tab unless
+ *  it's one of the tab-management ones. */
 ipcMain.handle('host:browser-toggle', (event, show: boolean) => {
   const win = ownerWindow(event.sender);
   if (!win) return;
   const state = getOrCreateResearchBrowser(win);
   state.visible = !!show;
+  const active = activeResearchTab(state);
+  if (!active) return;
   if (state.visible) {
-    win.contentView.addChildView(state.view);
+    win.contentView.addChildView(active.view);
     // No bounds yet — stay a zero-size view until the renderer's first
     // `host:browser-set-bounds` (right after toggle-on, once it knows
     // which pane it's docking into) lands.
   } else {
-    win.contentView.removeChildView(state.view);
+    win.contentView.removeChildView(active.view);
   }
 });
 
-/** Position the native view within the pane rect the renderer just
- *  measured (`el.getBoundingClientRect()`, tracked live via
- *  ResizeObserver) — the toolbar strip at the top of that same rect
- *  is ordinary DOM the renderer draws itself. Rect is in the window's
- *  CSS-pixel content-view coordinate space. */
+/** Position the ACTIVE tab's native view within the pane rect the
+ *  renderer just measured (`el.getBoundingClientRect()`, tracked
+ *  live via ResizeObserver, and re-sent after every tab switch) —
+ *  the toolbar strip at the top of that same rect is ordinary DOM
+ *  the renderer draws itself. Rect is in the window's CSS-pixel
+ *  content-view coordinate space. */
 ipcMain.handle(
   'host:browser-set-bounds',
   (event, rect: { x: number; y: number; width: number; height: number }) => {
     const win = ownerWindow(event.sender);
     const state = win && researchBrowsers.get(win.id);
     if (!state || !state.visible) return;
+    const active = activeResearchTab(state);
+    if (!active) return;
     const x = Math.round(rect.x);
     const y = Math.round(rect.y) + RESEARCH_BROWSER_TOOLBAR_HEIGHT;
     const width = Math.max(0, Math.round(rect.width));
     const height = Math.max(0, Math.round(rect.height) - RESEARCH_BROWSER_TOOLBAR_HEIGHT);
-    state.view.setBounds({ x, y, width, height });
+    active.view.setBounds({ x, y, width, height });
   },
 );
 
 ipcMain.handle('host:browser-navigate', (event, url: string) => {
   const win = ownerWindow(event.sender);
-  if (!win) return;
-  const state = researchBrowsers.get(win.id);
-  if (!state) return;
-  const target = isNavigableUrl(url)
-    ? url
-    : `https://www.google.com/search?q=${encodeURIComponent(url)}`;
-  void state.view.webContents.loadURL(target);
+  const state = win && researchBrowsers.get(win.id);
+  const active = state && activeResearchTab(state);
+  if (!active) return;
+  void active.view.webContents.loadURL(resolveNavigationTarget(url));
 });
 
 ipcMain.handle('host:browser-back', (event) => {
   const win = ownerWindow(event.sender);
   const state = win && researchBrowsers.get(win.id);
-  if (state?.view.webContents.navigationHistory.canGoBack()) {
-    state.view.webContents.navigationHistory.goBack();
+  const active = state && activeResearchTab(state);
+  if (active?.view.webContents.navigationHistory.canGoBack()) {
+    active.view.webContents.navigationHistory.goBack();
   }
 });
 
 ipcMain.handle('host:browser-forward', (event) => {
   const win = ownerWindow(event.sender);
   const state = win && researchBrowsers.get(win.id);
-  if (state?.view.webContents.navigationHistory.canGoForward()) {
-    state.view.webContents.navigationHistory.goForward();
+  const active = state && activeResearchTab(state);
+  if (active?.view.webContents.navigationHistory.canGoForward()) {
+    active.view.webContents.navigationHistory.goForward();
   }
 });
 
 ipcMain.handle('host:browser-reload', (event) => {
   const win = ownerWindow(event.sender);
   const state = win && researchBrowsers.get(win.id);
-  state?.view.webContents.reload();
+  const active = state && activeResearchTab(state);
+  active?.view.webContents.reload();
 });
 
 ipcMain.handle('host:browser-get-selection', async (event) => {
   const win = ownerWindow(event.sender);
   const state = win && researchBrowsers.get(win.id);
-  if (!state) return { text: '', title: '', url: '' };
+  const active = state && activeResearchTab(state);
+  if (!active) return { text: '', title: '', url: '' };
   try {
-    const text = await state.view.webContents.executeJavaScript(
+    const text = await active.view.webContents.executeJavaScript(
       'window.getSelection() ? window.getSelection().toString() : ""',
     );
     return {
       text: typeof text === 'string' ? text : '',
-      title: state.view.webContents.getTitle(),
-      url: state.view.webContents.getURL(),
+      title: active.view.webContents.getTitle(),
+      url: active.view.webContents.getURL(),
     };
   } catch {
     return { text: '', title: '', url: '' };
   }
+});
+
+/** New tab: create + attach (if the panel is visible) + make active.
+ *  Returns its id so the renderer can add it to the tab strip. */
+ipcMain.handle('host:browser-tab-new', (event) => {
+  const win = ownerWindow(event.sender);
+  if (!win) return null;
+  const state = getOrCreateResearchBrowser(win);
+  const tab = createResearchBrowserTab(win);
+  state.tabs.push(tab);
+  switchResearchBrowserTab(win, state, tab.id);
+  return { id: tab.id };
+});
+
+ipcMain.handle('host:browser-tab-switch', (event, tabId: string) => {
+  const win = ownerWindow(event.sender);
+  const state = win && researchBrowsers.get(win.id);
+  if (win && state) switchResearchBrowserTab(win, state, tabId);
+});
+
+/** Close a tab. Always keeps at least one tab alive — closing the
+ *  last one spawns a fresh blank tab rather than leaving the browser
+ *  with nothing to show. Closing the active tab switches to its
+ *  nearest remaining neighbor. */
+ipcMain.handle('host:browser-tab-close', (event, tabId: string) => {
+  const win = ownerWindow(event.sender);
+  const state = win && researchBrowsers.get(win.id);
+  if (!win || !state) return;
+  const idx = state.tabs.findIndex((t) => t.id === tabId);
+  if (idx === -1) return;
+  const [closed] = state.tabs.splice(idx, 1);
+  if (!closed) return;
+  const wasActive = state.activeTabId === closed.id;
+  if (state.visible && wasActive) win.contentView.removeChildView(closed.view);
+  closed.view.webContents.close();
+  if (state.tabs.length === 0) {
+    state.tabs.push(createResearchBrowserTab(win));
+  }
+  if (wasActive) {
+    const next = state.tabs[Math.min(idx, state.tabs.length - 1)]!;
+    switchResearchBrowserTab(win, state, next.id);
+  }
+});
+
+ipcMain.handle('host:browser-tab-list', (event) => {
+  const win = ownerWindow(event.sender);
+  const state = win && researchBrowsers.get(win.id);
+  if (!state) return [];
+  return state.tabs.map((t) => ({
+    id: t.id,
+    title: t.view.webContents.getTitle(),
+    url: t.view.webContents.getURL(),
+    active: t.id === state.activeTabId,
+  }));
 });
 
 /** Trigger an electron-updater check from the renderer. Mirrors

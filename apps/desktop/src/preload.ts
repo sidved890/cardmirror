@@ -729,6 +729,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }>,
   onBrowserNavState(
     handler: (state: {
+      tabId: string;
       url: string;
       title: string;
       canGoBack: boolean;
@@ -738,11 +739,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ): () => void {
     const listener = (
       _evt: unknown,
-      state: { url: string; title: string; canGoBack: boolean; canGoForward: boolean; loading: boolean },
+      state: {
+        tabId: string;
+        url: string;
+        title: string;
+        canGoBack: boolean;
+        canGoForward: boolean;
+        loading: boolean;
+      },
     ): void => handler(state);
     ipcRenderer.on('host:browser-nav-state', listener);
     return () => ipcRenderer.removeListener('host:browser-nav-state', listener);
   },
+  browserTabNew: () => ipcRenderer.invoke('host:browser-tab-new') as Promise<{ id: string } | null>,
+  browserTabSwitch: (tabId: string) =>
+    ipcRenderer.invoke('host:browser-tab-switch', tabId) as Promise<void>,
+  browserTabClose: (tabId: string) =>
+    ipcRenderer.invoke('host:browser-tab-close', tabId) as Promise<void>,
+  browserTabList: () =>
+    ipcRenderer.invoke('host:browser-tab-list') as Promise<
+      Array<{ id: string; title: string; url: string; active: boolean }>
+    >,
   onPowerResumed: (handler: () => void) => {
     const listener = () => handler();
     ipcRenderer.on('host:power-resumed', listener);

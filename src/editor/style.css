@@ -15230,7 +15230,7 @@ body.pmd-multi-doc #collab-chip {
    directly beneath this strip, filling the rest of the same pane. */
 .research-browser-toolbar {
   position: fixed;
-  height: 76px;
+  height: 108px;
   z-index: 400;
   background: var(--pmd-panel-bg, #fff);
   border-bottom: 1px solid var(--pmd-border, #ddd);
@@ -15239,6 +15239,47 @@ body.pmd-multi-doc #collab-chip {
   flex-direction: column;
   font-family: var(--pmd-ui-font);
   font-size: 0.85rem;
+}
+.research-browser-tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px 0;
+  overflow-x: auto;
+  height: 32px;
+}
+.research-browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 0 6px;
+  border: 1px solid var(--pmd-border, #ddd);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--pmd-c-bg-soft, #f0f0f0);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.research-browser-tab-active {
+  background: var(--pmd-panel-bg, #fff);
+  font-weight: 600;
+}
+.research-browser-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.research-browser-tab-close {
+  opacity: 0.6;
+  flex: 0 0 auto;
+}
+.research-browser-tab-close:hover {
+  opacity: 1;
+}
+.research-browser-tab-new {
+  flex: 0 0 auto;
+  width: 24px;
 }
 .research-browser-nav-row {
   display: flex;
