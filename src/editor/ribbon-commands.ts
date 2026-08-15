@@ -4414,6 +4414,10 @@ export type RibbonCommandId =
   | 'openFindByProximity'
   | 'toggleNavPane'
   | 'toggleResearchBrowser'
+  | 'researchBrowserNewTab'
+  | 'researchBrowserCloseTab'
+  | 'researchBrowserNextTab'
+  | 'researchBrowserPrevTab'
   // Commands that ship without a default binding — bindable via
   // Settings → Keyboard shortcuts. Each maps to a ribbon button or
   // menu item.
@@ -4635,6 +4639,10 @@ export const RIBBON_COMMAND_IDS: RibbonCommandId[] = [
   'openFindByProximity',
   'toggleNavPane',
   'toggleResearchBrowser',
+  'researchBrowserNewTab',
+  'researchBrowserCloseTab',
+  'researchBrowserNextTab',
+  'researchBrowserPrevTab',
   // Bindable ribbon actions with no default keys.
   'adjustFontSizeUp',
   'adjustFontSizeDown',
@@ -4816,6 +4824,10 @@ export const RIBBON_COMMAND_LABELS: Record<RibbonCommandId, string> = {
   openFindByProximity: 'Find Without Category Grouping',
   toggleNavPane: 'Show / Hide Navigation Pane',
   toggleResearchBrowser: 'Show / Hide Research Browser',
+  researchBrowserNewTab: 'Research Browser: New Tab',
+  researchBrowserCloseTab: 'Research Browser: Close Tab',
+  researchBrowserNextTab: 'Research Browser: Next Tab',
+  researchBrowserPrevTab: 'Research Browser: Previous Tab',
   adjustFontSizeUp: 'Increase Font Size by 1pt',
   adjustFontSizeDown: 'Decrease Font Size by 1pt',
   applyFontColor: 'Apply Font Color',
@@ -4891,6 +4903,10 @@ export const RIBBON_COMMAND_ALIASES: Partial<Record<RibbonCommandId, readonly st
   toggleCommentsVisible: ['toggle comments', 'comments'],
   toggleNavPane: ['toggle navigation pane', 'toggle nav pane', 'sidebar', 'outline pane'],
   toggleResearchBrowser: ['research browser', 'in-app browser', 'browse web', 'cite from browser'],
+  researchBrowserNewTab: ['new browser tab', 'browser new tab'],
+  researchBrowserCloseTab: ['close browser tab', 'browser close tab'],
+  researchBrowserNextTab: ['next browser tab', 'browser next tab', 'switch browser tab'],
+  researchBrowserPrevTab: ['previous browser tab', 'browser previous tab', 'switch browser tab'],
   toggleReadMode: ['show read mode', 'hide read mode', 'reader mode', 'reading mode'],
   toggleAutosave: ['enable autosave', 'disable autosave', 'turn on autosave', 'turn off autosave'],
   markActiveAsSpeech: ['toggle speech doc', 'set speech document'],
@@ -5196,6 +5212,11 @@ export const DEFAULT_RIBBON_KEYS: Record<RibbonCommandId, string | string[]> = {
   toggleNavPane: '',
   // No default — desktop-only, reachable via the ribbon.
   toggleResearchBrowser: '',
+  // No defaults — desktop-only, bind in Settings → Keyboard shortcuts.
+  researchBrowserNewTab: '',
+  researchBrowserCloseTab: '',
+  researchBrowserNextTab: '',
+  researchBrowserPrevTab: '',
   // Ribbon actions with no default key — all already reachable via
   // the ribbon, so a default chord would be noise. Bindable in
   // Settings → Keyboard shortcuts.
@@ -5438,6 +5459,13 @@ export interface RibbonContext {
   toggleNavPane: () => void;
   /** Toggle the docked research-browser panel (desktop-only). */
   toggleResearchBrowser: () => void;
+  /** Research-browser tab management — all no-op (with a toast where
+   *  relevant) while the panel is closed. Bindable, no defaults, so
+   *  each user picks their own tab-cycling chord. */
+  researchBrowserNewTab: () => void;
+  researchBrowserCloseTab: () => void;
+  researchBrowserNextTab: () => void;
+  researchBrowserPrevTab: () => void;
   /** Most-recently-picked font color (hex, no `#`, e.g. `"FF0000"`)
    *  or `null` when the user has chosen "Automatic" / no explicit
    *  color. Read at invocation time by the `applyFontColor` command
@@ -5561,6 +5589,10 @@ const DEFAULT_RIBBON_CONTEXT: RibbonContext = {
   openFindByProximity: () => {},
   toggleNavPane: () => {},
   toggleResearchBrowser: () => {},
+  researchBrowserNewTab: () => {},
+  researchBrowserCloseTab: () => {},
+  researchBrowserNextTab: () => {},
+  researchBrowserPrevTab: () => {},
   lastFontColor: () => null,
   openSettings: () => {},
   minimizeWindow: () => {},
@@ -6291,6 +6323,30 @@ function commandFor(id: RibbonCommandId, ctx: RibbonContext): Command {
       return (_state, dispatch) => {
         if (!dispatch) return true;
         ctx.toggleResearchBrowser();
+        return true;
+      };
+    case 'researchBrowserNewTab':
+      return (_state, dispatch) => {
+        if (!dispatch) return true;
+        ctx.researchBrowserNewTab();
+        return true;
+      };
+    case 'researchBrowserCloseTab':
+      return (_state, dispatch) => {
+        if (!dispatch) return true;
+        ctx.researchBrowserCloseTab();
+        return true;
+      };
+    case 'researchBrowserNextTab':
+      return (_state, dispatch) => {
+        if (!dispatch) return true;
+        ctx.researchBrowserNextTab();
+        return true;
+      };
+    case 'researchBrowserPrevTab':
+      return (_state, dispatch) => {
+        if (!dispatch) return true;
+        ctx.researchBrowserPrevTab();
         return true;
       };
     // ─── No-default-binding commands (keybinding parity for

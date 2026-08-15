@@ -45,6 +45,15 @@ const COLLAB_COMMANDS = new Set<RibbonCommandId>([
   'collabEndSession',
 ]);
 
+// Embeds a native WebContentsView — desktop only.
+const RESEARCH_BROWSER_COMMANDS = new Set<RibbonCommandId>([
+  'toggleResearchBrowser',
+  'researchBrowserNewTab',
+  'researchBrowserCloseTab',
+  'researchBrowserNextTab',
+  'researchBrowserPrevTab',
+]);
+
 export function isRibbonCommandAvailable(id: RibbonCommandId): boolean {
   if (FLOW_COMMANDS.has(id)) return isWindowsHost();
   if (id === 'toggleVoice') return getElectronHost() !== null;
@@ -77,8 +86,7 @@ export function isRibbonCommandAvailable(id: RibbonCommandId): boolean {
   // Intra-doc live windows work entirely within the open doc (no disk), so
   // they're available everywhere (not desktop-gated).
   if (COLLAB_COMMANDS.has(id)) return collabEnabled();
-  // Embeds a native WebContentsView — desktop only.
-  if (id === 'toggleResearchBrowser') return researchBrowserEnabled();
+  if (RESEARCH_BROWSER_COMMANDS.has(id)) return researchBrowserEnabled();
   return true;
 }
 

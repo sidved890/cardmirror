@@ -51,6 +51,7 @@ import {
   type SlotId,
 } from './multi-pane-shell.js';
 import { onAnyOverlayChange } from './overlay-stack.js';
+import { getSpeechDocResolver } from './speech-doc-registry.js';
 import { buildExternalInsertTransaction } from './external-insert.js';
 import {
   DEFAULT_AI_CITE_PROMPT,
@@ -201,6 +202,35 @@ export class ResearchBrowserPanel {
 
   isVisible(): boolean {
     return this.visible;
+  }
+
+  /** Open a new tab — the `researchBrowserNewTab` command. No-op
+   *  (with a toast) while the panel itself is closed; there's no
+   *  pane to put it in. */
+  createTabCommand(): void {
+    if (!this.visible) {
+      showToast('Open the research browser first.');
+      return;
+    }
+    void this.newTab();
+  }
+
+  /** Close the ACTIVE tab — the `researchBrowserCloseTab` command.
+   *  Mirrors clicking that tab's × (closing the last tab spawns a
+   *  fresh blank one rather than emptying the browser). */
+  closeTabCommand(): void {
+    if (!this.visible || !this.activeTabId) return;
+    void this.closeTab(this.activeTabId);
+  }
+
+  /** Cycle the active tab — `researchBrowserNextTab` /
+   *  `researchBrowserPrevTab`. Wraps around; no-op with 0-1 tabs. */
+  cycleTabCommand(direction: 1 | -1): void {
+    if (!this.visible || this.tabs.length < 2) return;
+    const idx = this.tabs.findIndex((t) => t.id === this.activeTabId);
+    if (idx === -1) return;
+    const next = this.tabs[(idx + direction + this.tabs.length) % this.tabs.length]!;
+    void this.switchTab(next.id);
   }
 
   toggle(): void {
@@ -421,10 +451,16 @@ export class ResearchBrowserPanel {
     return result;
   }
 
+  /** Unlike "Insert as Cite" (which builds a card in whatever pane
+   *  you're actively working — the browser might be right next to a
+   *  totally unrelated doc), plain-text drops are meant to land in
+   *  the speech doc: the flow use case is skimming a source and
+   *  dropping raw lines into the doc you're actually reading from,
+   *  regardless of which pane happens to be focused. */
   private async insertAsText(): Promise<void> {
-    const view = this.opts.getFocusedView();
+    const view = getSpeechDocResolver().getSpeechView();
     if (!view) {
-      showToast('Open a document to insert into first.');
+      showToast('No speech document is set — mark one first (Speech → Mark as Speech Document).');
       return;
     }
     const captured = await this.captureSelection();

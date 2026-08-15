@@ -1994,6 +1994,18 @@ const ribbonContext: RibbonContext = {
   toggleResearchBrowser: () => {
     researchBrowserPanel?.toggle();
   },
+  researchBrowserNewTab: () => {
+    researchBrowserPanel?.createTabCommand();
+  },
+  researchBrowserCloseTab: () => {
+    researchBrowserPanel?.closeTabCommand();
+  },
+  researchBrowserNextTab: () => {
+    researchBrowserPanel?.cycleTabCommand(1);
+  },
+  researchBrowserPrevTab: () => {
+    researchBrowserPanel?.cycleTabCommand(-1);
+  },
   // ─── No-default-binding hooks ────────────────────────────────
   // Each routes through the same button's existing click handler
   // (via `.click()`) — the keybinding then follows the exact same
@@ -4182,6 +4194,10 @@ const VIEWLESS_RIBBON_COMMANDS = new Set<AnyCommandId>([
   // The research-browser panel toggles independently of any open doc;
   // its insert actions merely no-op with a toast when nothing's focused.
   'toggleResearchBrowser',
+  'researchBrowserNewTab',
+  'researchBrowserCloseTab',
+  'researchBrowserNextTab',
+  'researchBrowserPrevTab',
   // Home screen overlay — pure UI, no doc needed. Must be view-
   // less so it works in multi-pane with zero panes open.
   'goHome',
@@ -4233,6 +4249,10 @@ function runViewlessRibbon(id: AnyCommandId): void {
     case 'zoomReset': ribbonContext.zoomReset(); return;
     case 'toggleNavPane': ribbonContext.toggleNavPane(); return;
     case 'toggleResearchBrowser': ribbonContext.toggleResearchBrowser(); return;
+    case 'researchBrowserNewTab': ribbonContext.researchBrowserNewTab(); return;
+    case 'researchBrowserCloseTab': ribbonContext.researchBrowserCloseTab(); return;
+    case 'researchBrowserNextTab': ribbonContext.researchBrowserNextTab(); return;
+    case 'researchBrowserPrevTab': ribbonContext.researchBrowserPrevTab(); return;
     case 'goHome': ribbonContext.goHome(); return;
     case 'openQuickCardSearch': ribbonContext.openQuickCardSearch(); return;
     case 'insertLiveZone': ribbonContext.insertLiveZone(); return;
