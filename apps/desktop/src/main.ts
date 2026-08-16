@@ -647,6 +647,19 @@ function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void 
  *  the button lights up (translucent fill) when the current selection
  *  is already formatted that way. Clear strips all three (plus a
  *  bare `<b>`) from the selection in one click regardless of state.
+ *
+ *  Cmd/Ctrl+drag adds a DISJOINT selection instead of replacing the
+ *  current one — Chromium's `Selection` only ever holds one native
+ *  Range, so a second accumulating set (`window.__cmMultiRanges`,
+ *  stashed on `window` so the separate get-selection/get-formatted-
+ *  selection IPC scripts below can read it too) tracks the union.
+ *  With 2+ committed ranges the union is painted with the CSS Custom
+ *  Highlight API (no DOM wrapping — that would corrupt the ranges'
+ *  own node boundaries) so it's visually distinct from the browser's
+ *  native (single, most-recent) selection color. A plain drag with no
+ *  modifier collapses back to a single range, same as normal
+ *  browsing. B/U/H/Clear act on the WHOLE accumulated set at once.
+ *
  *  Purely cosmetic on the source page; nothing is sent anywhere from
  *  here — "Send to Speech Doc" separately reads the resulting DOM
  *  back out via `host:browser-get-formatted-selection`. Guarded by a
@@ -657,6 +670,13 @@ function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void 
 const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
   if (window.__cmAnnotateInjected) return;
   window.__cmAnnotateInjected = true;
+  window.__cmMultiRanges = [];
+  var HIGHLIGHT_NAME = 'cm-multiselect';
+  if (typeof Highlight !== 'undefined' && window.CSS && CSS.highlights) {
+    var styleEl = document.createElement('style');
+    styleEl.textContent = '::highlight(' + HIGHLIGHT_NAME + ') { background-color: rgba(66,133,244,.35); }';
+    document.documentElement.appendChild(styleEl);
+  }
   var toolbar = null;
   var buttons = {};
   function ensureToolbar() {
@@ -688,6 +708,44 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     document.documentElement.appendChild(toolbar);
     return toolbar;
   }
+  // The set this click/drag committed to — window.__cmMultiRanges once
+  // 2+ disjoint pieces have been Cmd/Ctrl-added, otherwise whatever the
+  // browser's own native Selection currently holds (the common case).
+  function getActiveRanges() {
+    if (window.__cmMultiRanges.length > 0) return window.__cmMultiRanges;
+    var sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && !sel.isCollapsed) return [sel.getRangeAt(0)];
+    return [];
+  }
+  function renderMultiHighlight() {
+    if (typeof Highlight === 'undefined' || !window.CSS || !CSS.highlights) return;
+    if (window.__cmMultiRanges.length <= 1) {
+      CSS.highlights.delete(HIGHLIGHT_NAME);
+      return;
+    }
+    var hl = new Highlight();
+    for (var i = 0; i < window.__cmMultiRanges.length; i++) hl.add(window.__cmMultiRanges[i]);
+    CSS.highlights.set(HIGHLIGHT_NAME, hl);
+  }
+  document.addEventListener('mouseup', function(e) {
+    var sel = window.getSelection();
+    var hasSelection = sel && sel.rangeCount > 0 && !sel.isCollapsed;
+    if (e.metaKey || e.ctrlKey) {
+      if (hasSelection) window.__cmMultiRanges.push(sel.getRangeAt(0).cloneRange());
+    } else if (hasSelection) {
+      window.__cmMultiRanges = [sel.getRangeAt(0).cloneRange()];
+    } else {
+      window.__cmMultiRanges = [];
+    }
+    renderMultiHighlight();
+    positionToolbar();
+  }, true);
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    window.__cmMultiRanges = [];
+    renderMultiHighlight();
+    hideToolbar();
+  });
   function ancestorHasTag(node, tagName) {
     var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
     while (el && el.nodeType === Node.ELEMENT_NODE) {
@@ -696,11 +754,16 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     }
     return false;
   }
-  function selectionHasFormat(tagName) {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
-    var range = sel.getRangeAt(0);
+  function rangeHasFormat(range, tagName) {
     return ancestorHasTag(range.startContainer, tagName) && ancestorHasTag(range.endContainer, tagName);
+  }
+  function selectionHasFormat(tagName) {
+    var ranges = getActiveRanges();
+    if (ranges.length === 0) return false;
+    for (var i = 0; i < ranges.length; i++) {
+      if (!rangeHasFormat(ranges[i], tagName)) return false;
+    }
+    return true;
   }
   function collectMatchingElements(range, tagName) {
     var out = [];
@@ -741,32 +804,26 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
   // Range (its boundary containers can end up detached), which would
   // otherwise make the toolbar vanish right after a successful
   // unclick. Track every child node moved out during unwrapping and
-  // reselect from the first to the last of them, same way
-  // wrapSelection() re-selects the fresh wrapper's contents below.
-  function unwrapTag(tagName) {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
-    var range = sel.getRangeAt(0);
+  // return a fresh Range spanning them, same way wrapRange() below
+  // returns a fresh Range over the newly-wrapped contents.
+  function unwrapRangeTag(range, tagName) {
     var els = collectMatchingElements(range, tagName);
-    if (els.length === 0) return;
+    if (els.length === 0) return range;
     var movedOut = [];
     for (var i = 0; i < els.length; i++) unwrapElement(els[i], movedOut);
-    if (movedOut.length === 0) return;
+    if (movedOut.length === 0) return null;
     try {
       var newRange = document.createRange();
       newRange.setStartBefore(movedOut[0]);
       newRange.setEndAfter(movedOut[movedOut.length - 1]);
-      sel.removeAllRanges();
-      sel.addRange(newRange);
+      return newRange;
     } catch (err) {
       /* nodes ended up out of document order (overlapping wrappers) —
-         leave the selection as whatever the browser settled on. */
+         drop this range rather than keep a stale/invalid one. */
+      return null;
     }
   }
-  function wrapSelection(tagName) {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
-    var range = sel.getRangeAt(0);
+  function wrapRange(range, tagName) {
     var wrapper = document.createElement(tagName);
     try {
       range.surroundContents(wrapper);
@@ -775,24 +832,42 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
       wrapper.appendChild(contents);
       range.insertNode(wrapper);
     }
-    sel.removeAllRanges();
     var newRange = document.createRange();
     newRange.selectNodeContents(wrapper);
-    sel.addRange(newRange);
+    return newRange;
+  }
+  // Runs fn over every range in the active set (multi- or single-),
+  // replacing each with whatever fresh Range fn returns (null drops
+  // it), then re-syncs the multi-range store, the highlight overlay,
+  // and the native Selection (last surviving range — keeps ordinary
+  // single-selection callers, and the toolbar's own position/active
+  // checks, working exactly as before) to the result.
+  function applyToActiveRanges(fn) {
+    var ranges = getActiveRanges();
+    if (ranges.length === 0) return;
+    var updated = [];
+    for (var i = 0; i < ranges.length; i++) {
+      var next = fn(ranges[i]);
+      if (next) updated.push(next);
+    }
+    window.__cmMultiRanges = updated;
+    renderMultiHighlight();
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    if (updated.length > 0) sel.addRange(updated[updated.length - 1].cloneRange());
   }
   function toggleFormat(tagName) {
-    if (selectionHasFormat(tagName)) {
-      unwrapTag(tagName);
-    } else {
-      wrapSelection(tagName);
-    }
+    var turnOff = selectionHasFormat(tagName);
+    applyToActiveRanges(function(r) {
+      return turnOff ? unwrapRangeTag(r, tagName) : (rangeHasFormat(r, tagName) ? r : wrapRange(r, tagName));
+    });
     positionToolbar();
   }
   function clearFormatting() {
-    unwrapTag('STRONG');
-    unwrapTag('B');
-    unwrapTag('U');
-    unwrapTag('MARK');
+    applyToActiveRanges(function(r) { return unwrapRangeTag(r, 'STRONG'); });
+    applyToActiveRanges(function(r) { return unwrapRangeTag(r, 'B'); });
+    applyToActiveRanges(function(r) { return unwrapRangeTag(r, 'U'); });
+    applyToActiveRanges(function(r) { return unwrapRangeTag(r, 'MARK'); });
     positionToolbar();
   }
   function setActive(btn, active) {
@@ -801,9 +876,9 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     btn.style.background = active ? 'rgba(255,255,255,.35)' : 'transparent';
   }
   function positionToolbar() {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) { hideToolbar(); return; }
-    var rect = sel.getRangeAt(0).getBoundingClientRect();
+    var ranges = getActiveRanges();
+    if (ranges.length === 0) { hideToolbar(); return; }
+    var rect = ranges[ranges.length - 1].getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) { hideToolbar(); return; }
     var t = ensureToolbar();
     t.style.display = 'flex';
@@ -1050,8 +1125,21 @@ ipcMain.handle('host:browser-get-selection', async (event) => {
   const active = state && activeResearchTab(state);
   if (!active) return { text: '', title: '', url: '' };
   try {
+    // Cmd/Ctrl-dragged disjoint selections (RESEARCH_BROWSER_ANNOTATE_SCRIPT's
+    // window.__cmMultiRanges) join with a blank line between pieces; falls
+    // back to the plain native selection when nothing's been multi-picked.
     const text = await active.view.webContents.executeJavaScript(
-      'window.getSelection() ? window.getSelection().toString() : ""',
+      `(function() {
+        var ranges = (window.__cmMultiRanges && window.__cmMultiRanges.length > 0)
+          ? window.__cmMultiRanges
+          : null;
+        if (!ranges) {
+          var sel = window.getSelection();
+          if (sel && sel.rangeCount > 0 && !sel.isCollapsed) ranges = [sel.getRangeAt(0)];
+        }
+        if (!ranges || ranges.length === 0) return '';
+        return ranges.map(function(r) { return r.toString(); }).join('\\n\\n');
+      })()`,
     );
     return {
       text: typeof text === 'string' ? text : '',
@@ -1082,13 +1170,18 @@ ipcMain.handle('host:browser-get-formatted-selection', async (event) => {
   const active = state && activeResearchTab(state);
   if (!active) return { segments: [], text: '', title: '', url: '' };
   const script = `(function() {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+    var ranges = (window.__cmMultiRanges && window.__cmMultiRanges.length > 0)
+      ? window.__cmMultiRanges
+      : null;
+    if (!ranges) {
+      var sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && !sel.isCollapsed) ranges = [sel.getRangeAt(0)];
+    }
+    if (!ranges || ranges.length === 0) {
       return { segments: [], text: '', title: document.title, url: location.href };
     }
-    var range = sel.getRangeAt(0);
-    var frag = range.cloneContents();
     var segments = [];
+    var texts = [];
     function isBold(el) {
       if (el.tagName === 'B' || el.tagName === 'STRONG') return true;
       var fw = el.style && el.style.fontWeight;
@@ -1126,8 +1219,12 @@ ipcMain.handle('host:browser-get-formatted-selection', async (event) => {
         segments.push({ break: true });
       }
     }
-    walk(frag, { bold: false, underline: false, highlight: false });
-    return { segments: segments, text: sel.toString(), title: document.title, url: location.href };
+    for (var k = 0; k < ranges.length; k++) {
+      if (k > 0) segments.push({ break: true });
+      walk(ranges[k].cloneContents(), { bold: false, underline: false, highlight: false });
+      texts.push(ranges[k].toString());
+    }
+    return { segments: segments, text: texts.join('\\n\\n'), title: document.title, url: location.href };
   })()`;
   try {
     const result = await active.view.webContents.executeJavaScript(script);
