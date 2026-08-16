@@ -727,18 +727,41 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     }
     return seen;
   }
-  function unwrapElement(el) {
+  function unwrapElement(el, movedOut) {
     var parent = el.parentNode;
     if (!parent) return;
-    while (el.firstChild) parent.insertBefore(el.firstChild, el);
+    while (el.firstChild) {
+      var child = el.firstChild;
+      parent.insertBefore(child, el);
+      movedOut.push(child);
+    }
     parent.removeChild(el);
   }
+  // Removing the wrapper element(s) invalidates/collapses the live
+  // Range (its boundary containers can end up detached), which would
+  // otherwise make the toolbar vanish right after a successful
+  // unclick. Track every child node moved out during unwrapping and
+  // reselect from the first to the last of them, same way
+  // wrapSelection() re-selects the fresh wrapper's contents below.
   function unwrapTag(tagName) {
     var sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
     var range = sel.getRangeAt(0);
     var els = collectMatchingElements(range, tagName);
-    for (var i = 0; i < els.length; i++) unwrapElement(els[i]);
+    if (els.length === 0) return;
+    var movedOut = [];
+    for (var i = 0; i < els.length; i++) unwrapElement(els[i], movedOut);
+    if (movedOut.length === 0) return;
+    try {
+      var newRange = document.createRange();
+      newRange.setStartBefore(movedOut[0]);
+      newRange.setEndAfter(movedOut[movedOut.length - 1]);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+    } catch (err) {
+      /* nodes ended up out of document order (overlapping wrappers) —
+         leave the selection as whatever the browser settled on. */
+    }
   }
   function wrapSelection(tagName) {
     var sel = window.getSelection();
