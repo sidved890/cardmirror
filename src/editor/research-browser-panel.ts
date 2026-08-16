@@ -45,7 +45,7 @@
  *     button then reads the CURRENT selection back out as flat
  *     formatting-tagged runs (`host:browser-get-formatted-selection`
  *     — JSON, never raw HTML; see that handler's comment for why) and
- *     builds real `bold`/`underline_mark`/`highlight` marks with
+ *     builds real `emphasis_mark`/`underline_mark`/`highlight` marks with
  *     `buildFormattedInsertTransaction`, landing a formatted card in
  *     the speech doc — the highlighting the user did on the live page
  *     becomes the card's own highlighting.

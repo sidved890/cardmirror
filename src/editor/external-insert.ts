@@ -189,10 +189,18 @@ export type FormattedSegment = FormattedRun | { break: true };
  *  path above (closed-start/open-end slice at the cursor, `card_body`
  *  vs `paragraph` picked the same way), but building each run's text
  *  node with real marks instead of bare characters — bold → the
- *  `bold` mark, underline → `underline_mark` (body text is never
- *  structural, so `underline_direct` doesn't apply here — see the
- *  mark's doc comment in `schema/marks.ts`), highlight → `highlight`
- *  with the default yellow. */
+ *  `emphasis_mark` NAMED style (not the direct `bold` mark: "Bold" on
+ *  a card in this app IS the Emphasis character style, matching what
+ *  the editor's own Emphasis command applies), underline →
+ *  `underline_mark` (body text is never structural, so
+ *  `underline_direct` doesn't apply here — see the mark's doc comment
+ *  in `schema/marks.ts`), highlight → `highlight` with the default
+ *  yellow. `emphasis_mark` and `underline_mark` are mutually exclusive
+ *  (`excludes` in the schema) — a run flagged both bold AND underline
+ *  gets both marks added here, and `named-style-normalizer-plugin.ts`
+ *  resolves the conflict on the very next transaction the same way it
+ *  already does for cite/emphasis vs. underline everywhere else in the
+ *  app (emphasis wins). */
 export function buildFormattedInsertTransaction(
   state: EditorState,
   segments: FormattedSegment[],
@@ -208,7 +216,7 @@ export function buildFormattedInsertTransaction(
   }
   const bodyType = state.schema.nodes[bodyTypeName];
   if (!bodyType) return null;
-  const boldType = state.schema.marks['bold'];
+  const emphasisType = state.schema.marks['emphasis_mark'];
   const underlineType = state.schema.marks['underline_mark'];
   const highlightType = state.schema.marks['highlight'];
 
@@ -228,7 +236,7 @@ export function buildFormattedInsertTransaction(
     if (runs.length === 0) return bodyType.create(null, null);
     const textNodes = runs.map((r) => {
       const marks = [];
-      if (r.bold && boldType) marks.push(boldType.create());
+      if (r.bold && emphasisType) marks.push(emphasisType.create());
       if (r.underline && underlineType) marks.push(underlineType.create());
       if (r.highlight && highlightType) marks.push(highlightType.create({ color: 'yellow' }));
       return state.schema.text(r.text, marks);

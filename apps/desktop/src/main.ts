@@ -638,43 +638,107 @@ function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void 
 }
 
 /** Injected into every research-browser tab after each load — a small
- *  floating toolbar (Bold / Underline / Highlight) that appears near a
- *  live text selection and wraps it with the matching tag directly in
- *  the page's own DOM (no `designMode`/`execCommand`, which would make
- *  the whole page editable and break normal link-clicking). Purely
- *  cosmetic on the source page; nothing is sent anywhere from here —
- *  "Send to Speech Doc" separately reads the resulting DOM back out
- *  via `host:browser-get-formatted-selection`. Guarded by a marker
- *  flag so repeat `did-finish-load` events (SPA route changes, etc.)
- *  don't stack duplicate listeners/toolbars. Runs inside the tab's own
- *  isolated, unprivileged `webContents` — it never touches app APIs. */
+ *  floating toolbar (Bold / Underline / Highlight + Clear) that
+ *  appears near a live text selection and toggles the matching tag
+ *  directly in the page's own DOM (no `designMode`/`execCommand`,
+ *  which would make the whole page editable and break normal
+ *  link-clicking). Each of B/U/H TOGGLES: if the whole selection
+ *  already carries that tag it's unwrapped, otherwise it's wrapped —
+ *  the button lights up (translucent fill) when the current selection
+ *  is already formatted that way. Clear strips all three (plus a
+ *  bare `<b>`) from the selection in one click regardless of state.
+ *  Purely cosmetic on the source page; nothing is sent anywhere from
+ *  here — "Send to Speech Doc" separately reads the resulting DOM
+ *  back out via `host:browser-get-formatted-selection`. Guarded by a
+ *  marker flag so repeat `did-finish-load` events (SPA route changes,
+ *  etc.) don't stack duplicate listeners/toolbars. Runs inside the
+ *  tab's own isolated, unprivileged `webContents` — it never touches
+ *  app APIs. */
 const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
   if (window.__cmAnnotateInjected) return;
   window.__cmAnnotateInjected = true;
   var toolbar = null;
+  var buttons = {};
   function ensureToolbar() {
     if (toolbar) return toolbar;
     toolbar = document.createElement('div');
     toolbar.style.cssText = 'all:initial;position:fixed;z-index:2147483647;display:none;' +
-      'background:#1f2430;border-radius:6px;padding:4px;gap:2px;' +
+      'align-items:center;background:#1f2430;border-radius:6px;padding:4px;gap:2px;' +
       'box-shadow:0 2px 8px rgba(0,0,0,.35);font-family:-apple-system,sans-serif;';
-    function makeBtn(label, title, fn) {
+    function makeBtn(key, label, title, fn) {
       var b = document.createElement('button');
       b.textContent = label;
       b.title = title;
       b.style.cssText = 'all:unset;cursor:pointer;color:#fff;padding:4px 9px;font-size:13px;border-radius:4px;';
-      b.addEventListener('mouseenter', function() { b.style.background = 'rgba(255,255,255,.15)'; });
-      b.addEventListener('mouseleave', function() { b.style.background = 'transparent'; });
+      b.addEventListener('mouseenter', function() { if (b.dataset.active !== '1') b.style.background = 'rgba(255,255,255,.15)'; });
+      b.addEventListener('mouseleave', function() { if (b.dataset.active !== '1') b.style.background = 'transparent'; });
       b.addEventListener('mousedown', function(e) { e.preventDefault(); });
       b.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); fn(); });
       toolbar.appendChild(b);
+      buttons[key] = b;
       return b;
     }
-    makeBtn('B', 'Bold', function() { wrapSelection('STRONG'); });
-    makeBtn('U', 'Underline', function() { wrapSelection('U'); });
-    makeBtn('H', 'Highlight', function() { wrapSelection('MARK'); });
+    makeBtn('b', 'B', 'Bold (Emphasis) — click again to remove', function() { toggleFormat('STRONG'); });
+    makeBtn('u', 'U', 'Underline — click again to remove', function() { toggleFormat('U'); });
+    makeBtn('h', 'H', 'Highlight — click again to remove', function() { toggleFormat('MARK'); });
+    var sep = document.createElement('div');
+    sep.style.cssText = 'width:1px;align-self:stretch;background:rgba(255,255,255,.25);margin:0 2px;';
+    toolbar.appendChild(sep);
+    makeBtn('clear', 'Clear', 'Remove all formatting from the selection', function() { clearFormatting(); });
     document.documentElement.appendChild(toolbar);
     return toolbar;
+  }
+  function ancestorHasTag(node, tagName) {
+    var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    while (el && el.nodeType === Node.ELEMENT_NODE) {
+      if (el.tagName === tagName) return true;
+      el = el.parentElement;
+    }
+    return false;
+  }
+  function selectionHasFormat(tagName) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    var range = sel.getRangeAt(0);
+    return ancestorHasTag(range.startContainer, tagName) && ancestorHasTag(range.endContainer, tagName);
+  }
+  function collectMatchingElements(range, tagName) {
+    var out = [];
+    function collectAncestors(node) {
+      var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+      while (el) {
+        if (el.tagName === tagName) out.push(el);
+        el = el.parentElement;
+      }
+    }
+    collectAncestors(range.startContainer);
+    collectAncestors(range.endContainer);
+    var root = range.commonAncestorContainer;
+    if (root.nodeType === Node.TEXT_NODE) root = root.parentNode;
+    if (root && root.querySelectorAll) {
+      var descendants = root.querySelectorAll(tagName);
+      for (var i = 0; i < descendants.length; i++) {
+        if (range.intersectsNode(descendants[i])) out.push(descendants[i]);
+      }
+    }
+    var seen = [];
+    for (var j = 0; j < out.length; j++) {
+      if (seen.indexOf(out[j]) === -1) seen.push(out[j]);
+    }
+    return seen;
+  }
+  function unwrapElement(el) {
+    var parent = el.parentNode;
+    if (!parent) return;
+    while (el.firstChild) parent.insertBefore(el.firstChild, el);
+    parent.removeChild(el);
+  }
+  function unwrapTag(tagName) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    var range = sel.getRangeAt(0);
+    var els = collectMatchingElements(range, tagName);
+    for (var i = 0; i < els.length; i++) unwrapElement(els[i]);
   }
   function wrapSelection(tagName) {
     var sel = window.getSelection();
@@ -692,7 +756,26 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     var newRange = document.createRange();
     newRange.selectNodeContents(wrapper);
     sel.addRange(newRange);
+  }
+  function toggleFormat(tagName) {
+    if (selectionHasFormat(tagName)) {
+      unwrapTag(tagName);
+    } else {
+      wrapSelection(tagName);
+    }
     positionToolbar();
+  }
+  function clearFormatting() {
+    unwrapTag('STRONG');
+    unwrapTag('B');
+    unwrapTag('U');
+    unwrapTag('MARK');
+    positionToolbar();
+  }
+  function setActive(btn, active) {
+    if (!btn) return;
+    btn.dataset.active = active ? '1' : '0';
+    btn.style.background = active ? 'rgba(255,255,255,.35)' : 'transparent';
   }
   function positionToolbar() {
     var sel = window.getSelection();
@@ -702,9 +785,12 @@ const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
     var t = ensureToolbar();
     t.style.display = 'flex';
     var top = Math.max(4, rect.top - 40);
-    var left = Math.min(Math.max(4, rect.left), window.innerWidth - 110);
+    var left = Math.min(Math.max(4, rect.left), window.innerWidth - 190);
     t.style.top = top + 'px';
     t.style.left = left + 'px';
+    setActive(buttons.b, selectionHasFormat('STRONG'));
+    setActive(buttons.u, selectionHasFormat('U'));
+    setActive(buttons.h, selectionHasFormat('MARK'));
   }
   function hideToolbar() {
     if (toolbar) toolbar.style.display = 'none';
