@@ -998,6 +998,11 @@ ipcMain.handle('host:browser-get-formatted-selection', async (event) => {
         if (node.textContent) segments.push({ text: node.textContent, bold: fmt.bold, underline: fmt.underline, highlight: fmt.highlight });
         return;
       }
+      if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+        var fragChildren = node.childNodes;
+        for (var j = 0; j < fragChildren.length; j++) walk(fragChildren[j], fmt);
+        return;
+      }
       if (node.nodeType !== Node.ELEMENT_NODE) return;
       var el = node;
       if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
