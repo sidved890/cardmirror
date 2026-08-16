@@ -354,6 +354,19 @@ interface ElectronAPI {
   browserForward?(): Promise<void>;
   browserReload?(): Promise<void>;
   browserGetSelection?(): Promise<{ text: string; title: string; url: string }>;
+  /** Same selection, but as flat formatting-tagged runs (plus paragraph
+   *  `break` markers) instead of plain text — backs "Send to Speech
+   *  Doc", which needs to preserve bold/underline/highlight the user
+   *  applied on the live page. */
+  browserGetFormattedSelection?(): Promise<{
+    segments: Array<
+      | { text: string; bold?: boolean; underline?: boolean; highlight?: boolean }
+      | { break: true }
+    >;
+    text: string;
+    title: string;
+    url: string;
+  }>;
   onBrowserNavState?(
     handler: (state: {
       tabId: string;
@@ -1125,6 +1138,24 @@ export class ElectronHost implements Host {
   }
   async browserGetSelection(): Promise<{ text: string; title: string; url: string }> {
     return (await api().browserGetSelection?.()) ?? { text: '', title: '', url: '' };
+  }
+  async browserGetFormattedSelection(): Promise<{
+    segments: Array<
+      | { text: string; bold?: boolean; underline?: boolean; highlight?: boolean }
+      | { break: true }
+    >;
+    text: string;
+    title: string;
+    url: string;
+  }> {
+    return (
+      (await api().browserGetFormattedSelection?.()) ?? {
+        segments: [],
+        text: '',
+        title: '',
+        url: '',
+      }
+    );
   }
   onBrowserNavState(
     handler: (state: {

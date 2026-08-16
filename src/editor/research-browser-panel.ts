@@ -37,6 +37,18 @@
  *   - "Insert as Text" is the plain fallback: `buildExternalInsertTransaction`
  *     with `role: 'cite'`, no AI round-trip — mirrors the Fast Debate
  *     Paste insert primitive.
+ *   - "Send to Speech Doc" is article-cutting: main injects a small
+ *     floating toolbar into every loaded page (Bold / Underline /
+ *     Highlight — see `RESEARCH_BROWSER_ANNOTATE_SCRIPT` in
+ *     `apps/desktop/src/main.ts`) that wraps the live selection in
+ *     `<strong>`/`<u>`/`<mark>` directly on the page's own DOM. This
+ *     button then reads the CURRENT selection back out as flat
+ *     formatting-tagged runs (`host:browser-get-formatted-selection`
+ *     — JSON, never raw HTML; see that handler's comment for why) and
+ *     builds real `bold`/`underline_mark`/`highlight` marks with
+ *     `buildFormattedInsertTransaction`, landing a formatted card in
+ *     the speech doc — the highlighting the user did on the live page
+ *     becomes the card's own highlighting.
  */
 
 import type { EditorView } from 'prosemirror-view';
@@ -52,7 +64,7 @@ import {
 } from './multi-pane-shell.js';
 import { onAnyOverlayChange } from './overlay-stack.js';
 import { getSpeechDocResolver } from './speech-doc-registry.js';
-import { buildExternalInsertTransaction } from './external-insert.js';
+import { buildExternalInsertTransaction, buildFormattedInsertTransaction } from './external-insert.js';
 import {
   DEFAULT_AI_CITE_PROMPT,
   applyCiteToSelection,
@@ -105,6 +117,7 @@ export class ResearchBrowserPanel {
   private readonly forwardBtn: HTMLButtonElement;
   private readonly insertCiteBtn: HTMLButtonElement;
   private readonly insertTextBtn: HTMLButtonElement;
+  private readonly sendToSpeechBtn: HTMLButtonElement;
   private readonly pickerEl: HTMLDivElement;
   private readonly host = getElectronHost();
   private visible = false;
@@ -189,6 +202,13 @@ export class ResearchBrowserPanel {
     this.insertTextBtn.title = 'Insert the selected text as-is';
     this.insertTextBtn.addEventListener('click', () => void this.insertAsText());
 
+    this.sendToSpeechBtn = document.createElement('button');
+    this.sendToSpeechBtn.type = 'button';
+    this.sendToSpeechBtn.textContent = 'Send to Speech Doc';
+    this.sendToSpeechBtn.title =
+      'Cut the selection into a card, keeping any Bold/Underline/Highlight applied on the page';
+    this.sendToSpeechBtn.addEventListener('click', () => void this.sendToSpeechDoc());
+
     this.tabStripEl = document.createElement('div');
     this.tabStripEl.className = 'research-browser-tab-strip';
 
@@ -198,7 +218,7 @@ export class ResearchBrowserPanel {
 
     const actionRow = document.createElement('div');
     actionRow.className = 'research-browser-action-row';
-    actionRow.append(this.insertCiteBtn, this.insertTextBtn);
+    actionRow.append(this.insertCiteBtn, this.insertTextBtn, this.sendToSpeechBtn);
 
     this.el.append(this.tabStripEl, navRow, actionRow);
 
@@ -532,6 +552,33 @@ export class ResearchBrowserPanel {
       newParagraph: true,
     });
     if (tr) view.dispatch(tr);
+  }
+
+  /** Article-cutting: reads back whatever Bold/Underline/Highlight the
+   *  in-page toolbar applied to the current selection and lands it as
+   *  a formatted card in the speech doc — same targeting as "Insert as
+   *  Text" (the speech doc specifically, not the focused pane), since
+   *  this is the same "skim a source, drop lines into the doc you're
+   *  reading from" flow. */
+  private async sendToSpeechDoc(): Promise<void> {
+    if (!this.host) return;
+    const view = getSpeechDocResolver().getSpeechView();
+    if (!view) {
+      showToast('No speech document is set — mark one first (Speech → Mark as Speech Document).');
+      return;
+    }
+    const captured = await this.host.browserGetFormattedSelection();
+    if (!captured.text.trim()) {
+      showToast('Select some text in the research browser first.');
+      return;
+    }
+    const tr = buildFormattedInsertTransaction(view.state, captured.segments);
+    if (!tr) {
+      showToast('Nothing to cut from that selection.');
+      return;
+    }
+    view.dispatch(tr);
+    showToast('Sent to speech document.');
   }
 
   private async insertAsCite(): Promise<void> {

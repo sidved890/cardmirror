@@ -175,3 +175,68 @@ export function buildExternalInsertTransaction(
   tr.setStoredMarks([]);
   return tr;
 }
+
+/** One run of text carrying a fixed set of formatting flags — the
+ *  shape `research-browser-panel.ts`'s "Send to Speech Doc" gets back
+ *  from the embedded page (see `host:browser-get-formatted-selection`
+ *  in `apps/desktop/src/main.ts`). A bare `{ break: true }` marks a
+ *  paragraph boundary in the source (a `<p>`/`<div>`/`<br>`/`<li>`),
+ *  splitting the run list into separate body paragraphs below. */
+export type FormattedRun = { text: string; bold?: boolean; underline?: boolean; highlight?: boolean };
+export type FormattedSegment = FormattedRun | { break: true };
+
+/** Same body-paragraph insert shape as the plain-text `card`/`cite`
+ *  path above (closed-start/open-end slice at the cursor, `card_body`
+ *  vs `paragraph` picked the same way), but building each run's text
+ *  node with real marks instead of bare characters — bold → the
+ *  `bold` mark, underline → `underline_mark` (body text is never
+ *  structural, so `underline_direct` doesn't apply here — see the
+ *  mark's doc comment in `schema/marks.ts`), highlight → `highlight`
+ *  with the default yellow. */
+export function buildFormattedInsertTransaction(
+  state: EditorState,
+  segments: FormattedSegment[],
+): Transaction | null {
+  const $from = state.selection.$from;
+  let bodyTypeName: 'card_body' | 'paragraph' = 'paragraph';
+  for (let d = $from.depth; d > 0; d--) {
+    const t = $from.node(d).type.name;
+    if (t === 'card' || t === 'analytic_unit') {
+      bodyTypeName = 'card_body';
+      break;
+    }
+  }
+  const bodyType = state.schema.nodes[bodyTypeName];
+  if (!bodyType) return null;
+  const boldType = state.schema.marks['bold'];
+  const underlineType = state.schema.marks['underline_mark'];
+  const highlightType = state.schema.marks['highlight'];
+
+  const lines: FormattedRun[][] = [[]];
+  for (const seg of segments) {
+    if ('break' in seg) {
+      if (lines[lines.length - 1]!.length > 0) lines.push([]);
+      continue;
+    }
+    if (!seg.text) continue;
+    lines[lines.length - 1]!.push(seg);
+  }
+  while (lines.length > 1 && lines[lines.length - 1]!.length === 0) lines.pop();
+  if (lines.every((l) => l.length === 0)) return null;
+
+  const bodies = lines.map((runs) => {
+    if (runs.length === 0) return bodyType.create(null, null);
+    const textNodes = runs.map((r) => {
+      const marks = [];
+      if (r.bold && boldType) marks.push(boldType.create());
+      if (r.underline && underlineType) marks.push(underlineType.create());
+      if (r.highlight && highlightType) marks.push(highlightType.create({ color: 'yellow' }));
+      return state.schema.text(r.text, marks);
+    });
+    return bodyType.create(null, textNodes);
+  });
+  const slice = new Slice(Fragment.fromArray(bodies), 0, 1);
+  const tr = state.tr.replaceSelection(slice);
+  tr.setStoredMarks([]);
+  return tr;
+}

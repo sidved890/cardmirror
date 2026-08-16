@@ -727,6 +727,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       title: string;
       url: string;
     }>,
+  browserGetFormattedSelection: () =>
+    ipcRenderer.invoke('host:browser-get-formatted-selection') as Promise<{
+      segments: Array<
+        | { text: string; bold?: boolean; underline?: boolean; highlight?: boolean }
+        | { break: true }
+      >;
+      text: string;
+      title: string;
+      url: string;
+    }>,
   onBrowserNavState(
     handler: (state: {
       tabId: string;

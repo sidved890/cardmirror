@@ -637,6 +637,86 @@ function sendResearchBrowserNavState(win: BrowserWindow, tab: BrowserTab): void 
   });
 }
 
+/** Injected into every research-browser tab after each load — a small
+ *  floating toolbar (Bold / Underline / Highlight) that appears near a
+ *  live text selection and wraps it with the matching tag directly in
+ *  the page's own DOM (no `designMode`/`execCommand`, which would make
+ *  the whole page editable and break normal link-clicking). Purely
+ *  cosmetic on the source page; nothing is sent anywhere from here —
+ *  "Send to Speech Doc" separately reads the resulting DOM back out
+ *  via `host:browser-get-formatted-selection`. Guarded by a marker
+ *  flag so repeat `did-finish-load` events (SPA route changes, etc.)
+ *  don't stack duplicate listeners/toolbars. Runs inside the tab's own
+ *  isolated, unprivileged `webContents` — it never touches app APIs. */
+const RESEARCH_BROWSER_ANNOTATE_SCRIPT = `(function() {
+  if (window.__cmAnnotateInjected) return;
+  window.__cmAnnotateInjected = true;
+  var toolbar = null;
+  function ensureToolbar() {
+    if (toolbar) return toolbar;
+    toolbar = document.createElement('div');
+    toolbar.style.cssText = 'all:initial;position:fixed;z-index:2147483647;display:none;' +
+      'background:#1f2430;border-radius:6px;padding:4px;gap:2px;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,.35);font-family:-apple-system,sans-serif;';
+    function makeBtn(label, title, fn) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.title = title;
+      b.style.cssText = 'all:unset;cursor:pointer;color:#fff;padding:4px 9px;font-size:13px;border-radius:4px;';
+      b.addEventListener('mouseenter', function() { b.style.background = 'rgba(255,255,255,.15)'; });
+      b.addEventListener('mouseleave', function() { b.style.background = 'transparent'; });
+      b.addEventListener('mousedown', function(e) { e.preventDefault(); });
+      b.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); fn(); });
+      toolbar.appendChild(b);
+      return b;
+    }
+    makeBtn('B', 'Bold', function() { wrapSelection('STRONG'); });
+    makeBtn('U', 'Underline', function() { wrapSelection('U'); });
+    makeBtn('H', 'Highlight', function() { wrapSelection('MARK'); });
+    document.documentElement.appendChild(toolbar);
+    return toolbar;
+  }
+  function wrapSelection(tagName) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    var range = sel.getRangeAt(0);
+    var wrapper = document.createElement(tagName);
+    try {
+      range.surroundContents(wrapper);
+    } catch (err) {
+      var contents = range.extractContents();
+      wrapper.appendChild(contents);
+      range.insertNode(wrapper);
+    }
+    sel.removeAllRanges();
+    var newRange = document.createRange();
+    newRange.selectNodeContents(wrapper);
+    sel.addRange(newRange);
+    positionToolbar();
+  }
+  function positionToolbar() {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) { hideToolbar(); return; }
+    var rect = sel.getRangeAt(0).getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) { hideToolbar(); return; }
+    var t = ensureToolbar();
+    t.style.display = 'flex';
+    var top = Math.max(4, rect.top - 40);
+    var left = Math.min(Math.max(4, rect.left), window.innerWidth - 110);
+    t.style.top = top + 'px';
+    t.style.left = left + 'px';
+  }
+  function hideToolbar() {
+    if (toolbar) toolbar.style.display = 'none';
+  }
+  var selTimer = null;
+  document.addEventListener('selectionchange', function() {
+    clearTimeout(selTimer);
+    selTimer = setTimeout(positionToolbar, 80);
+  });
+  document.addEventListener('scroll', hideToolbar, true);
+})();`;
+
 function createResearchBrowserTab(win: BrowserWindow, initialUrl = RESEARCH_BROWSER_HOME): BrowserTab {
   const view = new WebContentsView({
     webPreferences: {
@@ -681,6 +761,9 @@ function createResearchBrowserTab(win: BrowserWindow, initialUrl = RESEARCH_BROW
   view.webContents.on('page-title-updated', notify);
   view.webContents.on('did-start-loading', notify);
   view.webContents.on('did-stop-loading', notify);
+  view.webContents.on('did-finish-load', () => {
+    void view.webContents.executeJavaScript(RESEARCH_BROWSER_ANNOTATE_SCRIPT).catch(() => {});
+  });
 
   void view.webContents.loadURL(initialUrl);
   return tab;
@@ -868,6 +951,75 @@ ipcMain.handle('host:browser-get-selection', async (event) => {
     };
   } catch {
     return { text: '', title: '', url: '' };
+  }
+});
+
+/** "Send to Speech Doc" — reads the active selection back out as a flat
+ *  list of `{text, bold, underline, highlight}` runs (plus paragraph
+ *  `break` markers) instead of raw HTML, entirely by WALKING the live,
+ *  already-cloned DOM inside the tab's own isolated `webContents` and
+ *  returning plain JSON. This deliberately avoids ever bringing an
+ *  HTML *string* from an untrusted page back into the privileged
+ *  renderer and assigning it to `innerHTML` there — a compromised or
+ *  malicious page's copied markup (stray `onerror`/`onload` handlers,
+ *  `<svg>`, etc.) could otherwise execute in a context that has
+ *  `window.electronAPI`. Formatting is picked up from the tags the
+ *  annotate toolbar inserts (`<strong>`/`<u>`/`<mark>`) as well as
+ *  whatever the source page itself already used for the same purpose
+ *  (`<b>`, inline `font-weight`/`text-decoration`). */
+ipcMain.handle('host:browser-get-formatted-selection', async (event) => {
+  const win = ownerWindow(event.sender);
+  const state = win && researchBrowsers.get(win.id);
+  const active = state && activeResearchTab(state);
+  if (!active) return { segments: [], text: '', title: '', url: '' };
+  const script = `(function() {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      return { segments: [], text: '', title: document.title, url: location.href };
+    }
+    var range = sel.getRangeAt(0);
+    var frag = range.cloneContents();
+    var segments = [];
+    function isBold(el) {
+      if (el.tagName === 'B' || el.tagName === 'STRONG') return true;
+      var fw = el.style && el.style.fontWeight;
+      return !!(fw && (fw === 'bold' || parseInt(fw, 10) >= 600));
+    }
+    function isUnderline(el) {
+      if (el.tagName === 'U') return true;
+      var td = el.style && el.style.textDecoration;
+      return !!(td && td.indexOf('underline') !== -1);
+    }
+    function isHighlight(el) {
+      return el.tagName === 'MARK';
+    }
+    function walk(node, fmt) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.textContent) segments.push({ text: node.textContent, bold: fmt.bold, underline: fmt.underline, highlight: fmt.highlight });
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      var el = node;
+      if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
+      var next = {
+        bold: fmt.bold || isBold(el),
+        underline: fmt.underline || isUnderline(el),
+        highlight: fmt.highlight || isHighlight(el),
+      };
+      var children = el.childNodes;
+      for (var i = 0; i < children.length; i++) walk(children[i], next);
+      if (el.tagName === 'P' || el.tagName === 'DIV' || el.tagName === 'BR' || el.tagName === 'LI') {
+        segments.push({ break: true });
+      }
+    }
+    walk(frag, { bold: false, underline: false, highlight: false });
+    return { segments: segments, text: sel.toString(), title: document.title, url: location.href };
+  })()`;
+  try {
+    const result = await active.view.webContents.executeJavaScript(script);
+    return result ?? { segments: [], text: '', title: '', url: '' };
+  } catch {
+    return { segments: [], text: '', title: '', url: '' };
   }
 });
 
